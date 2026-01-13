@@ -1,0 +1,704 @@
+/**
+ * ============================================================================
+ * MACRO CONVERTER: DEBUG VERSION WITH EXTENSIVE LOGGING
+ * * REQUIRED: Enable "Drive API" in Editor > Services > + > Drive API
+ * ============================================================================
+ */
+
+var SHEET_SETTINGS = "Nastavení";
+var SHEET_ZEDMT = "ZEDMT";             
+var SHEET_ZEDMT_SAP = "ZEDMT_SAP";     
+var SHEET_DISPO = "DispoReport";       
+var SHEET_DISPO_SAP = "DispoReport_SAP"; 
+var SHEET_FINAL = "FinálníData";
+var SHEET_PROMO = "Promotion";         
+var SHEET_PROMO_SAP = "akce_SAP";      
+var SHEET_PROCH_RLZ = "ProchazejiciRLZ";
+var SHEET_EXPORT_FIL = "ExportFilialeDispo";
+var SHEET_IMPORT_SOURCE = "Import";    
+
+// --- HELPERS ---
+
+function safeGetSheet(ss, name) {
+  var s = ss.getSheetByName(name);
+  if (!s) s = ss.insertSheet(name);
+  return s;
+}
+
+function resetSheet(ss, name) {
+  var s = ss.getSheetByName(name);
+  if (!s) s = ss.insertSheet(name);
+  else s.clear();
+  return s;
+}
+
+// CRITICAL FIX: Adds columns/rows AND forces a save
+function ensureGridSize(sheet, neededRows, neededCols) {
+  var curRows = sheet.getMaxRows();
+  var curCols = sheet.getMaxColumns();
+  Logger.log("ensureGridSize: " + sheet.getName() + " - Current: " + curRows + "x" + curCols + ", Needed: " + neededRows + "x" + neededCols);
+  if (neededRows > curRows) sheet.insertRowsAfter(curRows, neededRows - curRows);
+  if (neededCols > curCols) sheet.insertColumnsAfter(curCols, neededCols - curCols);
+  SpreadsheetApp.flush(); // FORCE SAVE
+  Logger.log("ensureGridSize: " + sheet.getName() + " - After: " + sheet.getMaxRows() + "x" + sheet.getMaxColumns());
+}
+
+// --- IMPORT ---
+
+function ImportFromDrive(silentMode) {
+  Logger.log("=== ImportFromDrive START ===");
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var impSheet = ss.getSheetByName(SHEET_IMPORT_SOURCE);
+  if (!impSheet) { if(!silentMode) Browser.msgBox("Missing 'Import' sheet"); return false; }
+  
+  var rawPath = impSheet.getRange("A1").getValue();
+  var folderId = (rawPath.toString().match(/[-\w]{25,}/) || [rawPath])[0];
+  var folder;
+  try { folder = DriveApp.getFolderById(folderId); } 
+  catch(e) { Browser.msgBox("Folder Error: " + e.message); return false; }
+
+  var fileMap = { "ZEDMT": SHEET_ZEDMT_SAP, "Dispo": SHEET_DISPO_SAP, "akce": SHEET_PROMO_SAP, "Promotion": SHEET_PROMO_SAP };
+  var files = folder.getFiles();
+  var found = 0;
+
+  while (files.hasNext()) {
+    var file = files.next();
+    var fName = file.getName().toLowerCase();
+    for (var key in fileMap) {
+      if (fName.indexOf(key.toLowerCase()) > -1 && fName.indexOf(".xls") > -1) {
+        Logger.log("Importing file: " + fName + " to sheet: " + fileMap[key]);
+        importExcelData(file.getId(), fileMap[key]);
+        found++;
+        break; 
+      }
+    }
+  }
+  if (found === 0) { Browser.msgBox("No files found."); return false; }
+  Logger.log("=== ImportFromDrive END - Found " + found + " files ===");
+  return true;
+}
+
+function importExcelData(fileId, sheetName) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  try {
+    var resource = { title: "TEMP", mimeType: MimeType.GOOGLE_SHEETS };
+    var tempFile = Drive.Files.copy(resource, fileId);
+    var tempSS = SpreadsheetApp.openById(tempFile.id);
+    var allSheets = tempSS.getSheets();
+    var sourceData = [];
+    for (var i=0; i<allSheets.length; i++) {
+      var d = allSheets[i].getDataRange().getValues();
+      if (d.length > 1) { sourceData = d; break; }
+    }
+    
+    Logger.log("importExcelData: " + sheetName + " - Data size: " + sourceData.length + "x" + (sourceData.length > 0 ? sourceData[0].length : 0));
+    var target = resetSheet(ss, sheetName);
+    if (sourceData.length > 0) {
+      ensureGridSize(target, sourceData.length, sourceData[0].length);
+      target.getRange(1, 1, sourceData.length, sourceData[0].length).setValues(sourceData);
+    }
+    Drive.Files.remove(tempFile.id);
+  } catch (e) { 
+    Logger.log("ERROR in importExcelData: " + e.message);
+    console.error(e); 
+  }
+}
+
+// --- MAIN ---
+
+function Vyhodnotit() {
+  try {
+    Logger.log("========================================");
+    Logger.log("=== VYHODNOTIT START ===");
+    Logger.log("========================================");
+    
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var settings = safeGetSheet(ss, SHEET_SETTINGS);
+
+    if (!settings.getRange("A2").getValue()) { Browser.msgBox("Missing DC!"); return; }
+
+    if (!ImportFromDrive(false)) return;
+
+    Logger.log("=== Processing sheets ===");
+    processZEDMT();
+    processDispo();
+    processPromotion();
+
+    Logger.log("=== Starting main ZEDMT processing ===");
+    var zSheet = safeGetSheet(ss, SHEET_ZEDMT);
+    var zLast = zSheet.getLastRow();
+    Logger.log("ZEDMT lastRow: " + zLast);
+    if (zLast < 2) { Browser.msgBox("ZEDMT Empty"); return; }
+
+    // Ensure we have at least 24 columns before reading
+    Logger.log("Ensuring ZEDMT grid size...");
+    ensureGridSize(zSheet, zLast, 24);
+    SpreadsheetApp.flush();
+    
+    Logger.log("Writing ZEDMT headers U1:X1");
+    zSheet.getRange("U1:X1").setValues([["Rozhodnutí", "Nejkratší DMT", "DMT", "kolli faktor"]]);
+    
+    Logger.log("Reading ZEDMT data: " + zLast + " rows x 24 cols");
+    var zData = zSheet.getRange(1, 1, zLast, 24).getValues();
+    Logger.log("ZEDMT data loaded: " + zData.length + " rows x " + (zData.length > 0 ? zData[0].length : 0) + " cols");
+    
+    var dnyRLZ = settings.getRange("J2").getValue();
+    var pct = settings.getRange("K2").getValue();
+    var decShort = settings.getRange("P2").getValue(); 
+    var decNone = settings.getRange("P3").getValue();  
+    var rlzProc = settings.getRange("H2").getValue();  
+    var decPass = settings.getRange("P4").getValue();  
+    var today = new Date(); today.setHours(0,0,0,0);
+    
+    Logger.log("Settings loaded - dnyRLZ: " + dnyRLZ + ", pct: " + pct + ", decShort: " + decShort + ", decNone: " + decNone);
+
+    Logger.log("Processing ZEDMT data rows...");
+    for (var i = 1; i < zData.length; i++) {
+      var valJ = String(zData[i][9] || "");
+      var dmt = null;
+      if (valJ.length === 8) dmt = new Date(valJ.substring(0,4), +valJ.substring(4,6)-1, valJ.substring(6,8));
+      zData[i][22] = dmt; 
+      // kolli faktor = Column K / Column M (indices 10 / 12)
+      if (zData[i][12] != 0) zData[i][23] = Number(zData[i][10]) / Number(zData[i][12]); 
+      else zData[i][23] = ""; 
+      
+      var valP = zData[i][15];
+      var valT = zData[i][19];
+      var res = decNone;
+      if (valP <= dnyRLZ) {
+        var dAdd = Math.floor(valP * pct);
+        var dCheck = new Date(today.getTime() + dAdd * 86400000);
+        if (dmt && dmt <= dCheck) res = decShort;
+      } else if (valT <= rlzProc) res = decPass;
+      zData[i][20] = res; 
+    }
+
+    Logger.log("Finding minimum dates...");
+    for (var i = 1; i < zData.length; i++) {
+      var art = zData[i][4];
+      var minD = null;
+      for (var k = 1; k < zData.length; k++) {
+        if (zData[k][4] == art) {
+          var d = zData[k][22];
+          if (d instanceof Date) { if (minD == null || d < minD) minD = d; }
+        }
+      }
+      zData[i][21] = minD;
+    }
+    
+    Logger.log("Writing processed ZEDMT data back: " + zLast + " rows x 24 cols");
+    zSheet.getRange(1, 1, zLast, 24).setValues(zData);
+    Logger.log("ZEDMT data written successfully");
+
+    // FIX: Init FinalData with 33 columns explicitly
+    Logger.log("=== Initializing FinalData sheet ===");
+    var finSheet = safeGetSheet(ss, SHEET_FINAL);
+    
+    // Save existing header if it exists
+    var existingHeader = null;
+    if (finSheet.getLastRow() > 0) {
+      Logger.log("Saving existing header from FinalData");
+      existingHeader = finSheet.getRange(1, 1, 1, Math.min(finSheet.getLastColumn(), 33)).getValues()[0];
+      Logger.log("Existing header saved: " + existingHeader.length + " columns");
+    }
+    
+    // Clear and reset sheet
+    finSheet.clear();
+    ensureGridSize(finSheet, 2, 33);
+    
+    // Restore header or create default
+    var headerRow = new Array(33).fill("");
+    if (existingHeader && existingHeader.length > 0) {
+      Logger.log("Restoring existing header");
+      for (var h = 0; h < Math.min(existingHeader.length, 33); h++) {
+        headerRow[h] = existingHeader[h] || "";
+      }
+    } else {
+      Logger.log("Creating default header");
+      headerRow[0] = "DC"; headerRow[1]="Sklad"; headerRow[2]="Artikl";
+    }
+    
+    Logger.log("Writing FinalData headers (33 cols)");
+    finSheet.getRange(1, 1, 1, 33).setValues([headerRow]);
+    SpreadsheetApp.flush();
+    Logger.log("FinalData initialized - Grid: " + finSheet.getMaxRows() + "x" + finSheet.getMaxColumns());
+
+    Logger.log("=== Building fRows array ===");
+    var fRows = [];
+    for (var i = 1; i < zData.length; i++) {
+      if (zData[i][20] !== decNone) {
+        var row = new Array(33).fill("");
+        row[2] = zData[i][4];  // Artikl in column 3 (index 2)
+        row[3] = zData[i][5];  // Next value in column 4 (index 3)
+        fRows.push(row);
+      }
+    }
+    Logger.log("fRows built: " + fRows.length + " items");
+
+    if (fRows.length === 0) { Browser.msgBox("No items."); return; }
+    
+    // Write full rows (all 33 columns)
+    Logger.log("Writing fRows to FinalData (all 33 cols): " + fRows.length + " rows");
+    ensureGridSize(finSheet, fRows.length + 1, 33);
+    SpreadsheetApp.flush();
+    finSheet.getRange(2, 1, fRows.length, 33).setValues(fRows); 
+    Logger.log("fRows written successfully");
+
+    Logger.log("=== Creating Pivot Table ===");
+    createPivotTable();
+    Logger.log("=== Pivot Table created ===");
+    
+    var fl = finSheet.getLastRow();
+    Logger.log("FinalData lastRow after pivot: " + fl);
+    if (fl > 1) {
+      Logger.log("Removing duplicates from FinalData...");
+      var numRows = fl - 1; // Number of data rows (excluding header)
+      Logger.log("Ensuring grid before removeDuplicates: " + fl + " rows, 33 cols");
+      ensureGridSize(finSheet, fl, 33);
+      SpreadsheetApp.flush();
+      
+      try {
+        // Try using the full row range instead of just columns 3-4
+        Logger.log("About to removeDuplicates on full range (2, 1, " + numRows + ", 33) based on cols 3-4");
+        var dupeRange = finSheet.getRange(2, 1, numRows, 33);
+        Logger.log("Range created, A1 notation: " + dupeRange.getA1Notation());
+        dupeRange.removeDuplicates([3, 4]); // Column 3 and 4 of the full range
+        Logger.log("Duplicates removed");
+      } catch(e) {
+        Logger.log("ERROR in removeDuplicates: " + e.message);
+        Logger.log("Stack: " + e.stack);
+        throw e;
+      }
+    }
+
+    Logger.log("=== Performing Final Matching ===");
+    performFinalMatching();
+    Logger.log("=== Final Matching completed ===");
+
+    Logger.log("========================================");
+    Logger.log("=== VYHODNOTIT SUCCESS ===");
+    Logger.log("========================================");
+    Browser.msgBox("Success!");
+  } catch (e) {
+    Logger.log("FATAL ERROR: " + e.message);
+    Logger.log("Stack: " + e.stack);
+    Browser.msgBox("FATAL ERROR: " + e.message + "\nLine: " + e.lineNumber);
+  }
+}
+
+// --- SUB-PROCESSORS ---
+
+function processZEDMT() {
+  Logger.log("processZEDMT START");
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var src = safeGetSheet(ss, SHEET_ZEDMT_SAP);
+  var dst = resetSheet(ss, SHEET_ZEDMT);
+  var data = src.getDataRange().getValues();
+  Logger.log("processZEDMT: Data size " + data.length + "x" + (data.length > 0 ? data[0].length : 0));
+  if (data.length > 0) {
+    ensureGridSize(dst, data.length, data[0].length);
+    dst.getRange(1, 1, data.length, data[0].length).setValues(data);
+  }
+  Logger.log("processZEDMT END");
+}
+
+function processDispo() {
+  Logger.log("processDispo START");
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var src = safeGetSheet(ss, SHEET_DISPO_SAP);
+  var dst = resetSheet(ss, SHEET_DISPO);
+  var data = src.getDataRange().getValues();
+  Logger.log("processDispo: Source data size " + data.length + "x" + (data.length > 0 ? data[0].length : 0));
+  if (data.length > 1) {
+    var out = [data[0]];
+    for (var i = 1; i < data.length; i++) {
+      if (String(data[i][18] || "").indexOf("1") > -1) out.push(data[i]);
+    }
+    Logger.log("processDispo: Filtered to " + out.length + " rows");
+    if (out.length > 0) {
+      ensureGridSize(dst, out.length, out[0].length);
+      dst.getRange(1, 1, out.length, out[0].length).setValues(out);
+    }
+  }
+  Logger.log("processDispo END");
+}
+
+function processPromotion() {
+  Logger.log("processPromotion START");
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var src = safeGetSheet(ss, SHEET_PROMO_SAP);
+  var dst = resetSheet(ss, SHEET_PROMO);
+  var data = src.getDataRange().getValues();
+  Logger.log("processPromotion: Source data size " + data.length + "x" + (data.length > 0 ? data[0].length : 0));
+  if (data.length > 0) {
+    var header = data.shift();
+    data.sort(function(a, b) {
+      if (a[3] === b[3]) return (a[24] < b[24] ? -1 : 1);
+      return (a[3] < b[3] ? -1 : 1);
+    });
+    data.unshift(header);
+    
+    var today = new Date(); today.setHours(0,0,0,0);
+    for(var i=1; i<data.length; i++) {
+      var y = new Date(data[i][24]);
+      var txt = data[i][0] + " | " + Utilities.formatDate(y, ss.getSpreadsheetTimeZone(), "dd.MM.yyyy");
+      if(y <= today) {
+        data[i][26] = txt; 
+        if(i < data.length-1 && data[i+1][3] == data[i][3]) {
+             var ny = new Date(data[i+1][24]);
+             data[i][27] = data[i+1][0] + " | " + Utilities.formatDate(ny, ss.getSpreadsheetTimeZone(), "dd.MM.yyyy");
+        }
+      } else {
+        data[i][27] = txt; 
+        if(i < data.length-1 && data[i+1][3] == data[i][3]) data[i+1][27] = txt;
+      }
+      if(i > 1 && data[i-1][3] == data[i][3]) {
+        if(!data[i][26]) data[i][26] = data[i-1][26];
+        if(!data[i][27]) data[i][27] = data[i-1][27];
+      }
+    }
+    // FIX: Promotion needs 28 cols (AB)
+    Logger.log("processPromotion: Writing " + data.length + " rows, ensuring 28 columns");
+    ensureGridSize(dst, data.length, 28);
+    dst.getRange(1, 1, data.length, data[0].length).setValues(data);
+  }
+  Logger.log("processPromotion END");
+}
+
+function createPivotTable() {
+  Logger.log("===== createPivotTable START =====");
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var zSheet = safeGetSheet(ss, SHEET_ZEDMT);
+  var pSheet = resetSheet(ss, SHEET_PROCH_RLZ);
+  var nepr = safeGetSheet(ss, SHEET_SETTINGS).getRange("P3").getValue();
+  var data = zSheet.getDataRange().getValues();
+  Logger.log("createPivotTable: ZEDMT data size " + data.length + "x" + (data.length > 0 ? data[0].length : 0));
+  
+  var map = {}, dates = [];
+  
+  for(var i=1; i<data.length; i++){
+    if(data[i][20]===nepr) continue;
+    var art = data[i][4], dt = data[i][22];
+    var dStr = (dt instanceof Date)? Utilities.formatDate(dt, ss.getSpreadsheetTimeZone(), "yyyy-MM-dd") : String(dt);
+    if(dates.indexOf(dStr)==-1) dates.push(dStr);
+    if(!map[art]) map[art]={};
+    if(!map[art][dStr]) map[art][dStr]=0;
+    map[art][dStr] += Number(data[i][12]||0);
+  }
+  dates.sort();
+  Logger.log("createPivotTable: Found " + dates.length + " unique dates, " + Object.keys(map).length + " articles");
+  
+  var out = [["Article"].concat(dates)];
+  for(var k in map){
+    var r = [k];
+    for(var d=0; d<dates.length; d++) r.push(map[k][dates[d]]||"");
+    out.push(r);
+  }
+  Logger.log("createPivotTable: Output array size " + out.length + "x" + (out.length > 0 ? out[0].length : 0));
+  
+  if(out.length>0) {
+    Logger.log("createPivotTable: Ensuring RLZ sheet size " + out.length + "x" + out[0].length);
+    Logger.log("createPivotTable: RLZ sheet before - " + pSheet.getMaxRows() + "x" + pSheet.getMaxColumns());
+    ensureGridSize(pSheet, out.length, out[0].length);
+    SpreadsheetApp.flush();
+    Logger.log("createPivotTable: RLZ sheet after - " + pSheet.getMaxRows() + "x" + pSheet.getMaxColumns());
+    Logger.log("createPivotTable: About to write data to range (1,1," + out.length + "," + out[0].length + ")");
+    pSheet.getRange(1,1,out.length,out[0].length).setValues(out);
+    Logger.log("createPivotTable: Data written successfully");
+  }
+  Logger.log("===== createPivotTable END =====");
+}
+
+function performFinalMatching() {
+  Logger.log("===== performFinalMatching START =====");
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var finSheet = safeGetSheet(ss, SHEET_FINAL);
+  
+  // FIX: Force grid to be large enough BEFORE reading
+  var lR = finSheet.getLastRow();
+  Logger.log("performFinalMatching: FinalData lastRow = " + lR);
+  Logger.log("performFinalMatching: Ensuring grid size " + lR + "x33");
+  ensureGridSize(finSheet, lR, 33);
+  SpreadsheetApp.flush();
+  Logger.log("performFinalMatching: FinalData grid after ensure: " + finSheet.getMaxRows() + "x" + finSheet.getMaxColumns());
+
+  if (lR < 2) {
+    Logger.log("performFinalMatching: lR < 2, returning");
+    return; 
+  }
+
+  Logger.log("performFinalMatching: Reading FinalData range (1,1," + lR + ",33)");
+  var fData = finSheet.getRange(1, 1, lR, 33).getValues();
+  Logger.log("performFinalMatching: fData size " + fData.length + "x" + (fData.length > 0 ? fData[0].length : 0));
+  
+  var zAll = safeGetSheet(ss, SHEET_ZEDMT).getDataRange().getValues();
+  Logger.log("performFinalMatching: zAll size " + zAll.length + "x" + (zAll.length > 0 ? zAll[0].length : 0));
+  
+  var dAll = safeGetSheet(ss, SHEET_DISPO).getDataRange().getValues();
+  Logger.log("performFinalMatching: dAll size " + dAll.length + "x" + (dAll.length > 0 ? dAll[0].length : 0));
+  
+  var pAll = safeGetSheet(ss, SHEET_PROMO).getDataRange().getValues();
+  Logger.log("performFinalMatching: pAll size " + pAll.length + "x" + (pAll.length > 0 ? pAll[0].length : 0));
+  
+  var decNone = safeGetSheet(ss, SHEET_SETTINGS).getRange("P3").getValue();
+
+  Logger.log("performFinalMatching: Processing " + fData.length + " rows");
+  for (var i=1; i<fData.length; i++) {
+    var art = fData[i][2]; 
+    if(!art) continue;
+    
+    if(i <= 5 || i % 100 === 0) Logger.log("performFinalMatching: Processing row " + i + ", article: " + art);
+
+    var zIdx = -1;
+    for(var z=1; z<zAll.length; z++) { if(zAll[z][4] == art) { zIdx=z; break; }}
+    if(zIdx>-1){
+      fData[i][0] = zAll[zIdx][0]; 
+      fData[i][1] = zAll[zIdx][1]; 
+      var sum=0;
+      for(var s=1; s<zAll.length; s++) if(zAll[s][4]==art && zAll[s][20]!==decNone) sum+=Number(zAll[s][12]||0);
+      fData[i][4]=sum; 
+      fData[i][5]=zAll[zIdx][15]; fData[i][6]=zAll[zIdx][17]; fData[i][7]=zAll[zIdx][18]; fData[i][25]=zAll[zIdx][23]; 
+    }
+    
+    var dIdx=-1;
+    for(var d=1; d<dAll.length; d++){ if(dAll[d][0]==art){dIdx=d; break;}}
+    if(dIdx>-1){
+      var dRow = dAll[dIdx];
+      var dRowLen = dRow.length;
+      if(i <= 5) Logger.log("performFinalMatching: Row " + i + " - dRow length: " + dRowLen);
+      
+      fData[i][8]=dRow[21]||0; fData[i][9]=dRow[22]||0;
+      fData[i][10]=Number(dRow[23]||0)+Number(dRow[24]||0); fData[i][11]=dRow[25]||0; 
+      fData[i][12]=(fData[i][4]||0) - ((fData[i][8]||0)+(fData[i][9]||0)+(fData[i][10]||0)+(fData[i][11]||0)); 
+      fData[i][14]=dRow[3]||"";
+      fData[i][15]=dRow[2]||"";
+      fData[i][16]=dRow[9]||0; 
+      fData[i][17]=dRow[10]||0;
+      fData[i][18]=dRow[8]||"";
+      fData[i][19]=dRow[26]||0; 
+      if((dRow[27]||0)==0 && (dRow[13]||"")==="") { fData[i][20]=""; fData[i][21]=""; }
+      else { fData[i][20]=dRow[27]||0; fData[i][21]=dRow[13]||""; }
+      fData[i][22]=dRow[28]||0;
+      fData[i][23]=dRow[14]||"";
+      fData[i][24]=dRow[15]||0; 
+      fData[i][26]=dRow[35]||"";
+      fData[i][27]=dRow[36]||"";
+      fData[i][28]=dRow[17]||0; 
+      fData[i][29]=dRow[16]||0;
+      fData[i][32]=dRow[6]||"";
+    }
+    
+    var pIdx=-1;
+    for(var p=1; p<pAll.length; p++){if(pAll[p][3]==art){pIdx=p; break;}}
+    if(pIdx>-1){ 
+      var pRow = pAll[pIdx];
+      var pRowLen = pRow.length;
+      if(i <= 5) Logger.log("performFinalMatching: Row " + i + " - pRow length: " + pRowLen);
+      
+      fData[i][30]=pRow[26]||""; 
+      fData[i][31]=pRow[27]||""; 
+    }
+  }
+  
+  Logger.log("performFinalMatching: Data processing complete, writing back");
+  Logger.log("performFinalMatching: fData final size " + fData.length + "x" + fData[0].length);
+  Logger.log("performFinalMatching: Ensuring grid size " + fData.length + "x" + fData[0].length);
+  ensureGridSize(finSheet, fData.length, fData[0].length);
+  SpreadsheetApp.flush();
+  Logger.log("performFinalMatching: FinalData grid after final ensure: " + finSheet.getMaxRows() + "x" + finSheet.getMaxColumns());
+  Logger.log("performFinalMatching: About to write range (1,1," + fData.length + "," + fData[0].length + ")");
+  finSheet.getRange(1, 1, fData.length, fData[0].length).setValues(fData);
+  Logger.log("performFinalMatching: Data written successfully");
+  
+  Logger.log("performFinalMatching: Deleting rows with <= 0 in col 12");
+  var delRows = [];
+  for (var i=fData.length; i>=2; i--) {
+    if(fData[i-1][12] <= 0) {
+      Logger.log("performFinalMatching: Deleting row " + i);
+      finSheet.deleteRow(i);
+    }
+  }
+  Logger.log("===== performFinalMatching END =====");
+}
+
+// --- UI & EXPORTS (Keep existing) ---
+function onOpen(){SpreadsheetApp.getUi().createMenu('MACRO').addItem('Sidebar','showSidebar').addToUi();}
+function showSidebar(){SpreadsheetApp.getUi().showSidebar(HtmlService.createHtmlOutputFromFile('Sidebar').setTitle('Macro').setWidth(300));}
+function getRibbonUI(){
+  var s = safeGetSheet(SpreadsheetApp.getActiveSpreadsheet(), SHEET_SETTINGS);
+  return {
+    dc: s.getRange("Q2:Q20").getValues().flat().filter(String),
+    sklad: s.getRange("R2:R50").getValues().flat().filter(String),
+    defaults: {sapInput: s.getRange("G2").getValue(), evalInput: s.getRange("H2").getValue(), dateInput: s.getRange("I2").getValue()}
+  };
+}
+function ribbonOnChange(id, v){
+  var s = safeGetSheet(SpreadsheetApp.getActiveSpreadsheet(), SHEET_SETTINGS);
+  if(id=="dc") s.getRange("A2").setValue(v);
+  if(id=="sklad") s.getRange("B2").setValue(v);
+  if(id=="sapInput") s.getRange("G2").setValue(v);
+  if(id=="evalInput") s.getRange("H2").setValue(v);
+  if(id=="dateInput") s.getRange("I2").setValue(v ? new Date(v) : "");
+}
+function ExportDat(){
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var lnk = safeGetSheet(ss, SHEET_SETTINGS).getRange("L2").getValue();
+  var f = DriveApp.getFolderById(lnk.match(/[-\w]{25,}/)[0]);
+  var nm = "Kritické_RLZ_" + Utilities.formatDate(new Date(), ss.getSpreadsheetTimeZone(), "yyyyMMdd");
+  var nss = SpreadsheetApp.create(nm);
+  safeGetSheet(ss, SHEET_FINAL).copyTo(nss).setName(SHEET_FINAL);
+  safeGetSheet(ss, SHEET_ZEDMT_SAP).copyTo(nss).setName(SHEET_ZEDMT_SAP);
+  nss.deleteSheet(nss.getSheets()[0]);
+  DriveApp.getFileById(nss.getId()).moveTo(f);
+  Browser.msgBox("Exported: " + nm);
+}
+function ExportFilialeDispo(){
+  Logger.log("=== ExportFilialeDispo START ===");
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sSettings = safeGetSheet(ss, SHEET_SETTINGS);
+  var sExp = resetSheet(ss, SHEET_EXPORT_FIL);
+  var sFin = safeGetSheet(ss, SHEET_FINAL);
+  var sPro = safeGetSheet(ss, SHEET_PROCH_RLZ);
+  
+  // Get DC and Sklad from settings
+  var dc = sSettings.getRange("A2").getValue();
+  var sklad = sSettings.getRange("B2").getValue();
+  var cesta = sSettings.getRange("L2").getValue();
+  
+  Logger.log("DC: " + dc + ", Sklad: " + sklad);
+  
+  // Set headers matching VBA exactly
+  sExp.appendRow(["Záv.","Materiál","Krát.text materiálu","Množství k přerozdělení","VMJ","DMT","Kreis","Počet ks ve VMJ"]);
+  
+  var fD = sFin.getDataRange().getValues();
+  var lstrow = fD.length;
+  Logger.log("FinalData rows: " + lstrow);
+  
+  if(lstrow < 2) {
+    Browser.msgBox("No data in FinálníData");
+    return;
+  }
+  
+  // Copy Material (C) and Text (D) columns from FinalData to Export B and C
+  var materialTextData = [];
+  for(var i=1; i<fD.length; i++){
+    materialTextData.push([fD[i][2], fD[i][3]]);
+  }
+  if(materialTextData.length > 0) {
+    ensureGridSize(sExp, materialTextData.length+1, 8);
+    sExp.getRange(2, 2, materialTextData.length, 2).setValues(materialTextData);
+  }
+  
+  Logger.log("Material and Text copied: " + materialTextData.length + " rows");
+  
+  // Get ProchazejiciRLZ data
+  var pD = sPro.getDataRange().getValues();
+  Logger.log("ProchazejiciRLZ size: " + pD.length + "x" + (pD.length > 0 ? pD[0].length : 0));
+  
+  if(pD.length < 2) {
+    Logger.log("WARNING: ProchazejiciRLZ has no data rows");
+  }
+  
+  var pHead = pD[0];
+  var lstcol = pHead.length;
+  Logger.log("ProchazejiciRLZ columns: " + lstcol);
+  
+  // Now process each row
+  for(var row=2; row<=lstrow; row++){
+    var rowIdx = row - 1; // Array index (row 2 = index 1)
+    
+    // Set columns 1, 4, 5, 7, 8 from FinalData
+    sExp.getRange(row, 1).setValue(dc);
+    sExp.getRange(row, 4).setValue(fD[rowIdx][12]); // Column M (index 12)
+    sExp.getRange(row, 5).setValue(fD[rowIdx][32]); // Column AG (index 32)
+    sExp.getRange(row, 7).setValue(fD[rowIdx][29]); // Column AD (index 29)
+    sExp.getRange(row, 8).setValue(fD[rowIdx][25]); // Column Z (index 25)
+    
+    var prochZasoba = fD[rowIdx][12]; // Needed quantity
+    var zasobaArtiklRLZ = 0;
+    var dmtStr = "";
+    
+    // Get the article from the export sheet (already written in column B)
+    var article = sExp.getRange(row, 2).getValue();
+    
+    if(!article) {
+      Logger.log("Row " + row + ": No article found");
+      continue;
+    }
+    
+    // Find article in ProchazejiciRLZ
+    var findArticleRow = -1;
+    for(var p=1; p<pD.length; p++){
+      if(pD[p][0] == article){
+        findArticleRow = p;
+        break;
+      }
+    }
+    
+    if(findArticleRow > -1){
+      // Loop through columns (dates) starting from column 2 (index 1)
+      for(var col=2; col<=lstcol; col++){
+        var colIdx = col - 1;
+        var cellVal = pD[findArticleRow][colIdx];
+        
+        // Check if cell is not empty (matching VBA logic)
+        if(cellVal !== "" && cellVal != null && cellVal !== 0){
+          var dateHeader = pHead[colIdx];
+          var dateStr = "";
+          
+          if(dateHeader instanceof Date){
+            dateStr = Utilities.formatDate(dateHeader, ss.getSpreadsheetTimeZone(), "dd.MM.yyyy");
+          } else {
+            dateStr = String(dateHeader);
+          }
+          
+          if(dmtStr == ""){
+            // First date
+            dmtStr = dateStr;
+            zasobaArtiklRLZ += Number(cellVal);
+          } else {
+            // Additional dates
+            if(zasobaArtiklRLZ < prochZasoba){
+              dmtStr += "; " + dateStr;
+              zasobaArtiklRLZ += Number(cellVal);
+            } else {
+              // Stop accumulating, go to next article
+              break;
+            }
+          }
+        }
+      }
+    } else {
+      Logger.log("Row " + row + ": Article '" + article + "' not found in ProchazejiciRLZ");
+    }
+    
+    // Write DMT to column 6
+    sExp.getRange(row, 6).setValue(dmtStr);
+  }
+  
+  Logger.log("All rows processed");
+  
+  // Format and auto-resize
+  sExp.getRange(2, 6, lstrow-1, 1).setNumberFormat("@"); // Text format for DMT
+  sExp.autoResizeColumns(1, 8);
+  
+  // Export to Drive
+  var folderId = (cesta.toString().match(/[-\w]{25,}/) || [cesta])[0];
+  var folder = DriveApp.getFolderById(folderId);
+  var myFileName = "Export_pro_Filiale_Dispo_" + 
+    Utilities.formatDate(new Date(), ss.getSpreadsheetTimeZone(), "yyyyMMdd") + 
+    "_" + dc + "_" + sklad;
+  
+  Logger.log("Creating export file: " + myFileName);
+  
+  // Create new spreadsheet
+  var nss = SpreadsheetApp.create(myFileName);
+  sExp.copyTo(nss).setName(SHEET_EXPORT_FIL);
+  nss.deleteSheet(nss.getSheets()[0]);
+  
+  // Move to target folder
+  DriveApp.getFileById(nss.getId()).moveTo(folder);
+  
+  Logger.log("=== ExportFilialeDispo END ===");
+  Browser.msgBox("Export pro Filiale Dispo je připraven. Soubor je uložen na " + cesta);
+}

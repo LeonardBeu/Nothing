@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      body { background-color: #f3f3f3; font-family: 'Segoe UI', sans-serif; padding: 10px; color: #333; position: relative; min-height: 400px; }
+      .card { background: white; padding: 15px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.12); margin-bottom: 10px; }
+      h3 { margin-top: 0; font-size: 14px; color: #444; border-bottom: 1px solid #eee; padding-bottom: 5px; }
+      label { display: block; font-size: 11px; margin-top: 10px; font-weight: 600; color: #666; }
+      select, input { width: 100%; padding: 8px; margin-top: 4px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+      
+      .btn { width: 100%; padding: 10px; margin-top: 15px; background-color: #0f9d58; color: white; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background 0.3s; }
+      .btn:hover { background-color: #0b8043; }
+      .btn:disabled { background-color: #ccc; cursor: not-allowed; }
+      
+      .btn-export { background-color: #4285f4; }
+      .btn-export:hover { background-color: #3367d6; }
+      .btn-filiale { background-color: #673ab7; }
+      .btn-filiale:hover { background-color: #5e35b1; }
+      .icon { margin-right: 8px; font-size: 16px; }
+      
+      /* Loader Styles */
+      #loader { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255, 255, 255, 0.85); z-index: 999; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
+      .spinner { border: 4px solid #f3f3f3; border-top: 4px solid #3498db; border-radius: 50%; width: 30px; height: 30px; animation: spin 1s linear infinite; margin-bottom: 10px; }
+      @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+      .loader-text { font-size: 12px; font-weight: bold; color: #555; }
+    </style>
+  </head>
+  <body>
+
+    <div id="loader">
+      <div class="spinner"></div>
+      <div class="loader-text" id="loaderMsg">Working...</div>
+    </div>
+
+    <div class="card">
+      <h3>Configuration</h3>
+      <label>DC</label>
+      <select id="dc" onchange="save(this)"><option>Loading...</option></select>
+      
+      <label>Sklad</label>
+      <select id="sklad" onchange="save(this)"><option>Loading...</option></select>
+      
+      <label>Zbývající doba platnosti vstup SAP</label>
+      <input type="number" id="sapInput" onchange="save(this)" placeholder="0">
+      
+      <label>Zbývající doba pro vyhodnocení</label>
+      <input type="number" id="evalInput" onchange="save(this)" placeholder="0">
+      
+      <label>Datum dodání filiálky</label>
+      <input type="date" id="dateInput" onchange="save(this)">
+    </div>
+
+    <div class="card">
+      <h3>Actions</h3>
+      
+      <button class="btn" id="btnVyhodnotit" onclick="run('Vyhodnotit', 'Importing & Analyzing...')">
+        <span class="icon">⚡</span> Vyhodnotit
+      </button>
+      
+      <button class="btn btn-export" id="btnExport" onclick="run('ExportDat', 'Saving Backup...')">
+        <span class="icon">💾</span> Uložit vyhodnocení
+      </button>
+
+      <button class="btn btn-filiale" id="btnFiliale" onclick="run('ExportFilialeDispo', 'Exporting Report...')">
+        <span class="icon">🚛</span> Export pro Filiale Dispo
+      </button>
+    </div>
+
+    <script>
+      // 1. On Load: Populate Dropdowns via server-side 'getRibbonUI'
+      window.onload = function() { 
+        google.script.run.withSuccessHandler(fillDropdowns).getRibbonUI(); 
+      };
+      
+      function fillDropdowns(data) { 
+        fillSelect('dc', data.dc); 
+        fillSelect('sklad', data.sklad); 
+        // Sync Inputs with Sheet Data
+        if(data.defaults.sapInput) document.getElementById('sapInput').value = data.defaults.sapInput;
+        if(data.defaults.evalInput) document.getElementById('evalInput').value = data.defaults.evalInput;
+        if(data.defaults.dateInput) {
+           var d = new Date(data.defaults.dateInput);
+           // Handle weird date parsing offset if necessary, though iso string usually works
+           var iso = d.getFullYear() + '-' + ('0' + (d.getMonth()+1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2);
+           document.getElementById('dateInput').value = iso;
+        }
+      }
+      
+      function fillSelect(id, list) { 
+        var el = document.getElementById(id); 
+        el.innerHTML = '<option value="">Select...</option>'; 
+        list.forEach(item => { 
+          var opt = document.createElement('option'); 
+          opt.value = item; 
+          opt.text = item; 
+          el.add(opt); 
+        }); 
+      }
+      
+      // 2. On Change: Save to Sheet via server-side 'ribbonOnChange'
+      function save(el) { 
+        google.script.run.ribbonOnChange(el.id, el.value); 
+      }
+      
+      // 3. On Click: Run specific Macro function via server-side call
+      function run(funcName, msg) {
+        // UI Interaction: Lock buttons, show loader
+        document.querySelectorAll('.btn').forEach(btn => btn.disabled = true);
+        document.getElementById('loaderMsg').innerText = msg || "Working...";
+        document.getElementById('loader').style.display = 'flex';
+
+        // CALL GOOGLE APPS SCRIPT FUNCTION
+        google.script.run
+          .withSuccessHandler(function() {
+            // Reset UI on success
+            document.getElementById('loader').style.display = 'none';
+            document.querySelectorAll('.btn').forEach(btn => btn.disabled = false);
+          })
+          .withFailureHandler(function(e) {
+            // Reset UI on failure
+            document.getElementById('loader').style.display = 'none';
+            document.querySelectorAll('.btn').forEach(btn => btn.disabled = false);
+            alert("Error: " + e.message);
+          })
+          [funcName](); // Dynamically calls Vyhodnotit(), ExportDat(), etc.
+      }
+    </script>
+  </body>
+</html>

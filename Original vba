@@ -1,0 +1,943 @@
+Sub Vyhodnotit()
+
+    Dim DMT_dle_procenta As Date
+    Dim DMT_zasoba As Date
+
+    With shtSettings
+        .Select
+        
+        If .Range("A2").Value = "" Or Range("B2").Value = "" Then
+            MsgBox "Není vyplnìno DC nebo sklad! Prosím zadej DC a sklad a spus znovu", vbCritical
+            Exit Sub
+        ElseIf .Range("G2").Value = "" Or .Range("H2").Value = "" Then
+            MsgBox "Není vyplnìna zbývající doba platnosti pro SAP nebo pro vyhodnocení!", vbCritical
+            Exit Sub
+        ElseIf .Range("A2").Value = "9200" And .Range("B2").Value = "C33" Then
+            MsgBox "Zadaný sklad " & .Range("B2").Value & " neodpovídá zvolenému DC " & .Range("A2").Value & "!", vbCritical
+            Exit Sub
+        ElseIf .Range("A2").Value = "9300" And .Range("B2").Value = "C23" Then
+            MsgBox "Zadaný sklad " & .Range("B2").Value & " neodpovídá zvolenému DC " & .Range("A2").Value & "!", vbCritical
+            Exit Sub
+        ElseIf .Range("I2").Value = "" Then
+            MsgBox "Není vyplnìno datum dodání pro hledání otevøených objednávek filiálek!", vbCritical
+            Exit Sub
+        ElseIf .Range("J2").Value = "" Then
+            MsgBox "Není vyplnìn poèet dní pro vyhodnocení artiklù s krátkým RLZ!", vbCritical
+            Exit Sub
+        ElseIf .Range("K2").Value = "" Then
+            MsgBox "Není vyplnìno procento pro vyhodnocení artiklù s krátkým RLZ!", vbCritical
+            Exit Sub
+        End If
+    
+    End With
+    
+    shtZEDMT.Visible = True
+    shtDispoReport.Visible = True
+    shtPivotZEDMT.Visible = True
+    shtProchazejiciRLZ.Visible = True
+    shtPromotion.Visible = True
+    
+    With shtFinalData
+        .Select
+        
+        If .AutoFilterMode = True Then
+            .AutoFilterMode = False
+        End If
+        
+        lstrow = Cells(Rows.Count, 1).End(xlUp).Row
+        lstcol = Cells(1, Columns.Count).End(xlToLeft).Column
+        
+        If lstrow > 1 Then
+            .Range(Cells(2, 1), Cells(lstrow, lstcol)).Clear
+        End If
+    End With
+    
+    With shtDispoReport
+        .Select
+        .Cells.Clear
+    End With
+    
+    With shtZEDMT
+        .Select
+        
+        If .AutoFilterMode = True Then
+            .AutoFilterMode = False
+        End If
+        
+        .Cells.Clear
+    End With
+    
+    Call ZEDMT_Query_SAP
+    
+    With shtZEDMT
+        .Select
+        
+        .Columns("K").NumberFormat = "0"
+        .Columns("M").NumberFormat = "0"
+        .Columns("R").NumberFormat = "0"
+        .Columns("V:W").NumberFormat = "m/d/yyyy"
+        
+        .Range("U1") = "Rozhodnutí"
+        .Range("V1") = "Nejkratší DMT"
+        .Range("W1") = "DMT"
+        .Range("X1") = "kolli faktor"
+        
+        
+        lstrow = Cells(Rows.Count, 1).End(xlUp).Row
+        lstcol = Cells(1, Columns.Count).End(xlToLeft).Column
+        
+        .Range("W2").Select
+        ActiveCell.FormulaR1C1 = "=DATEVALUE(CONCAT(RIGHT(RC[-13],2),""."",MID(RC[-13],5,2),""."",LEFT(RC[-13],4)))"
+        .Range("X2").Select
+        ActiveCell.FormulaR1C1 = "=RC[-13]/RC[-11]"
+        
+        If lstrow > 2 Then
+            .Range("W2:X2").Select
+            Selection.AutoFill Destination:=Range("W2:X" & lstrow), Type:=xlFillDefault
+        End If
+        
+        For i = 2 To lstrow
+        
+            If .Range("P" & i) <= [DnyRLZ] Then
+            
+                DMT_dle_procenta = Date + WorksheetFunction.RoundDown(.Range("P" & i) * [ProcentoPrerozdeleni], 0)
+                DMT_zasoba = Right(.Range("J" & i), 2) & "." & Mid(.Range("J" & i), 5, 2) & "." & Left(.Range("J" & i), 4)
+                
+                If DMT_zasoba <= DMT_dle_procenta Then
+                    .Range("U" & i) = [PrerozdelitKratkeRLZ]
+                Else
+                    .Range("U" & i) = [Neprerozdelovat]
+                End If
+                
+            Else
+            
+                If .Range("T" & i) <= [RLZ_zpracovani] Then
+                    .Range("U" & i) = [PrerozdelitProchazejiciRLZ]
+                Else
+                    .Range("U" & i) = [Neprerozdelovat]
+                End If
+            
+            End If
+            
+            .Range("V" & i) = Application.WorksheetFunction.MinIfs( _
+            .Range("W1:W" & shtZEDMT.Cells(Rows.Count, 1).End(xlUp).Row), _
+            .Range("E1:E" & shtZEDMT.Cells(Rows.Count, 1).End(xlUp).Row), .Range("E" & i))
+                
+        Next i
+            
+        .Range("$A$1:$X$" & lstrow).AutoFilter field:=lstcol - 3, Criteria1:="<>" & [Neprerozdelovat]
+        lstrow = Cells(Rows.Count, 1).End(xlUp).Row
+        
+        If lstrow = 1 Then
+            MsgBox "Žádný artikl nevyhodnocen, makro bude ukonèeno!", vbInformation
+            GoTo konec
+        Else
+            .Range("E2:F" & lstrow).SpecialCells(xlCellTypeVisible).Copy
+            shtFinalData.Range("C2").PasteSpecial xlPasteValues
+        End If
+    
+    End With
+    
+    Call ZEDMT_zpracovani
+    
+    With shtFinalData
+        .Select
+        
+        lstrow = Cells(Rows.Count, 3).End(xlUp).Row
+        
+        .Range("C1:D" & lstrow).RemoveDuplicates Columns:=Array(1, 2), Header:=xlYes
+        
+    End With
+    
+    Call Dispo_report_SAP
+    
+    With shtDispoReport
+        .Select
+        
+        .Columns("U:Z").NumberFormat = "0.00"
+        .Columns("AB").NumberFormat = "0.00"
+        .Columns("AD").NumberFormat = "0.00"
+        .Columns("AH:AK").NumberFormat = "0.00"
+    End With
+    
+    Call Akce_Query_SAP
+    Call DohledaniAkce
+    
+    With shtFinalData
+        .Select
+        
+        lstrow = Cells(Rows.Count, 3).End(xlUp).Row
+        
+        For i = 2 To lstrow
+    
+        Set findArticleZEDMT = shtZEDMT.Range("E:E").Find(What:=.Range("C" & i).Value, LookAt:=xlWhole)
+        Set findArticleDispoReport = shtDispoReport.Range("A:A").Find(What:=.Range("C" & i).Value, LookAt:=xlWhole)
+        Set findArticleAkce = shtPromotion.Range("D:D").Find(What:=.Range("C" & i).Value, LookAt:=xlWhole)
+        
+            If findArticleZEDMT Is Nothing Then
+
+            Else
+                findArticleZEDMTRow = findArticleZEDMT.Row
+                .Cells(i, 1) = shtZEDMT.Cells(findArticleZEDMTRow, 1)
+                .Cells(i, 2) = shtZEDMT.Cells(findArticleZEDMTRow, 2)
+                .Cells(i, 5) = Application.WorksheetFunction.SumIfs( _
+                shtZEDMT.Range("M1:M" & shtZEDMT.Cells(Rows.Count, 1).End(xlUp).Row), _
+                shtZEDMT.Range("E1:E" & shtZEDMT.Cells(Rows.Count, 1).End(xlUp).Row), .Range("C" & i), _
+                shtZEDMT.Range("U1:U" & shtZEDMT.Cells(Rows.Count, 1).End(xlUp).Row), "<>" & [Neprerozdelovat])
+                .Cells(i, 6) = shtZEDMT.Cells(findArticleZEDMTRow, 16)
+                .Cells(i, 7) = shtZEDMT.Cells(findArticleZEDMTRow, 18)
+                .Cells(i, 8) = shtZEDMT.Cells(findArticleZEDMTRow, 19)
+                .Cells(i, 26) = shtZEDMT.Cells(findArticleZEDMTRow, 24)
+                
+                If shtZEDMT.Cells(findArticleZEDMTRow, 22) <= Date + 2 Then
+                    .Range(.Cells(i, 1), .Cells(i, 33)).Interior.Color = RGB(255, 153, 0)
+                End If
+                
+            End If
+            
+            If findArticleDispoReport Is Nothing Then
+            
+            Else
+                findArticleDispoReportRow = findArticleDispoReport.Row
+                .Cells(i, 9) = shtDispoReport.Cells(findArticleDispoReportRow, 22)
+                .Cells(i, 10) = shtDispoReport.Cells(findArticleDispoReportRow, 23)
+                .Cells(i, 11) = shtDispoReport.Cells(findArticleDispoReportRow, 24) + shtDispoReport.Cells(findArticleDispoReportRow, 25)
+                .Cells(i, 12) = shtDispoReport.Cells(findArticleDispoReportRow, 26)
+                .Cells(i, 13) = .Cells(i, 5) - .Cells(i, 9) - .Cells(i, 10) - .Cells(i, 11) - .Cells(i, 12)
+                .Cells(i, 15) = shtDispoReport.Cells(findArticleDispoReportRow, 4)
+                .Cells(i, 16) = shtDispoReport.Cells(findArticleDispoReportRow, 3)
+                .Cells(i, 17) = shtDispoReport.Cells(findArticleDispoReportRow, 10)
+                .Cells(i, 18) = shtDispoReport.Cells(findArticleDispoReportRow, 11)
+                .Cells(i, 19) = shtDispoReport.Cells(findArticleDispoReportRow, 9)
+                .Cells(i, 20) = shtDispoReport.Cells(findArticleDispoReportRow, 27)
+                
+                If shtDispoReport.Cells(findArticleDispoReportRow, 28) = 0 And shtDispoReport.Cells(findArticleDispoReportRow, 14) = "" Then
+                    .Cells(i, 21) = ""
+                    .Cells(i, 22) = ""
+                Else
+                    .Cells(i, 21) = shtDispoReport.Cells(findArticleDispoReportRow, 28)
+                    .Cells(i, 22) = shtDispoReport.Cells(findArticleDispoReportRow, 14)
+                End If
+                
+                .Cells(i, 23) = shtDispoReport.Cells(findArticleDispoReportRow, 29)
+                .Cells(i, 24) = shtDispoReport.Cells(findArticleDispoReportRow, 15)
+                .Cells(i, 25) = shtDispoReport.Cells(findArticleDispoReportRow, 16)
+                .Cells(i, 27) = shtDispoReport.Cells(findArticleDispoReportRow, 36)
+                .Cells(i, 28) = shtDispoReport.Cells(findArticleDispoReportRow, 37)
+                .Cells(i, 29) = shtDispoReport.Cells(findArticleDispoReportRow, 18)
+                .Cells(i, 30) = shtDispoReport.Cells(findArticleDispoReportRow, 17)
+                .Cells(i, 33) = shtDispoReport.Cells(findArticleDispoReportRow, 7)
+            End If
+            
+            If findArticleAkce Is Nothing Then
+
+            Else
+                findArticleAkceRow = findArticleAkce.Row
+                .Cells(i, 31) = shtPromotion.Cells(findArticleAkceRow, 27)
+                .Cells(i, 32) = shtPromotion.Cells(findArticleAkceRow, 28)
+            End If
+            
+        Next i
+    
+        For i = lstrow To 2 Step -1
+            If .Range("M" & i) <= 0 Then
+                .Rows(i).EntireRow.Delete
+            End If
+            
+        Next i
+        
+        .Columns("A:AG").EntireColumn.AutoFit
+        .Range("N2:N" & lstrow).Select
+        
+        With Selection.Validation
+            .Delete
+            .Add Type:=xlValidateList, AlertStyle:=xlValidAlertStop, Operator:=xlBetween, Formula1:="=Nastavení!$Q$2:$Q$7"
+            .IgnoreBlank = True
+            .InCellDropdown = True
+            .InputTitle = ""
+            .ErrorTitle = ""
+            .InputMessage = ""
+            .ErrorMessage = ""
+            .ShowInput = True
+            .ShowError = True
+        End With
+        
+        .Range("A1").Select
+        
+    End With
+    
+''    Call ExportDat
+    
+    shtZEDMT.Visible = 0
+    shtDispoReport.Visible = 0
+    shtPivotZEDMT.Visible = 0
+    shtProchazejiciRLZ.Visible = 0
+    shtPromotion.Visible = 0
+    
+    Application.CutCopyMode = False
+    
+    cesta = [cesta]
+    
+    MsgBox "Vyhodnocení pro kritické DMT na frische je hotovo.", vbInformation
+konec:
+    
+End Sub
+
+Sub ExportDat()
+        
+    cesta = [cesta]
+    dc = [dc]
+    sklad = [sklad]
+
+    myFileName = "Kritické_RLZ_Frische_" & Format(Date, "yyyymmdd") & "_" & dc & "_" & sklad & ".xlsx"
+    Worksheets(Array("FinálníData", "ZEDMT_SAP")).Copy
+    
+    With ActiveWorkbook
+         .SaveAs Filename:=cesta & myFileName ', FileFormat:=xlWorkbookNormal
+         .Close SaveChanges:=False
+    End With
+    
+    MsgBox "Soubor je uložen na " & cesta, vbInformation
+
+End Sub
+
+Sub Dispo_report_SAP()
+
+    Dim SAP
+
+    With shtFinalData
+        .Select
+        
+        lstrow = Cells(Rows.Count, 3).End(xlUp).Row
+        
+        .Range("C2:C" & lstrow).Select
+        Selection.Copy
+    End With
+    
+    If Dir("C:\Program Files\SAP\FrontEnd\SAPGUI\saplogon.exe") = "" Then
+        Call Shell("C:\Program Files (x86)\SAP\FrontEnd\SAPgui\saplogon.exe", vbNormalFocus)
+    Else: Call Shell("C:\Program Files\SAP\FrontEnd\SAPGUI\saplogon.exe", vbNormalFocus)
+    End If
+    
+    Application.Wait Now + TimeValue("00:00:07")
+    
+    Set sgui = GetObject("SAPGUI")
+    If Err <> 0 Then
+        MsgBox "Je tøeba spustit SAP logon.", vbInformation
+        'End
+    End If
+    
+    Set sapp = sgui.GetScriptingEngine
+    tp1 = -1
+    'Call spath
+    For cykl = 0 To sapp.Connections.Count - 1
+        Set Connection = sapp.Children(CInt(cykl))
+        Set session = Connection.Children(0)
+        'LES
+        If session.info.systemname = "TP1" Then
+            tp1 = cykl
+        End If
+    Next cykl
+    
+    If tp1 = -1 Then
+        Set Connection = sapp.openconnection("CZ RET TP1 Productionsystem", True)
+''        Set Connection = sapp.openconnection("CZ RET A00 Testsystem", True)
+        Set session = Connection.Children(0)
+    Else
+        Set Connection = sapp.Children(CInt(tp1))
+        Set session = Connection.Children(0)
+    End If
+    
+    session.findById("wnd[0]").maximize
+    session.findById("wnd[0]/tbar[0]/okcd").text = "/nZSCM_DC_DR"
+    session.findById("wnd[0]/tbar[0]/btn[0]").press
+    session.findById("wnd[0]/tbar[1]/btn[17]").press
+
+    session.findById("wnd[1]/usr/txtV-LOW").text = "KRITICKE_DMT"
+
+    session.findById("wnd[1]/usr/txtENAME-LOW").text = ""
+    session.findById("wnd[1]/usr/txtENAME-LOW").SetFocus
+    session.findById("wnd[1]/usr/txtENAME-LOW").caretPosition = 0
+    session.findById("wnd[1]/tbar[0]/btn[8]").press
+    session.findById("wnd[0]/usr/ctxtS_WERKS-LOW").text = [dc]
+    session.findById("wnd[0]/usr/ctxtS_LGFSB-LOW").text = "0003"
+    session.findById("wnd[0]/usr/ctxtS_MATNR-LOW").SetFocus
+    session.findById("wnd[0]/usr/ctxtS_MATNR-LOW").caretPosition = 0
+    session.findById("wnd[0]/usr/btn%_S_MATNR_%_APP_%-VALU_PUSH").press
+    session.findById("wnd[1]/tbar[0]/btn[16]").press
+    session.findById("wnd[1]/tbar[0]/btn[24]").press
+    session.findById("wnd[1]/tbar[0]/btn[8]").press
+    session.findById("wnd[0]/usr/ctxtS_EINDT-LOW").text = [DatDodani]
+    session.findById("wnd[0]/usr/ctxtS_EINDT-HIGH").text = ""
+    session.findById("wnd[0]/tbar[1]/btn[8]").press
+
+''    session.findById("wnd[0]/usr/cntlGRID1/shellcont/shell").contextMenu
+''    session.findById("wnd[0]/usr/cntlGRID1/shellcont/shell").selectContextMenuItem "&XXL"
+
+    session.findById("wnd[0]/usr/cntlGRID1/shellcont/shell/shellcont[1]/shell").contextMenu
+    session.findById("wnd[0]/usr/cntlGRID1/shellcont/shell/shellcont[1]/shell").selectContextMenuItem "&XXL"
+    
+''    session.findById("wnd[1]/usr/cmbG_LISTBOX").SetFocus
+''    session.findById("wnd[1]/usr/cmbG_LISTBOX").Key = "33"
+''    session.findById("wnd[1]/tbar[0]/btn[0]").press
+
+    session.findById("wnd[1]/usr/ssubSUB_CONFIGURATION:SAPLSALV_GUI_CUL_EXPORT_AS:0512/cmbGS_EXPORT-FORMAT").Key = "   8-TT-STANDARD"
+    session.findById("wnd[1]/tbar[0]/btn[20]").press
+    
+''    session.findById("wnd[1]/tbar[0]/btn[0]").press
+    session.findById("wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[0,0]").Select
+    session.findById("wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[0,0]").SetFocus
+    session.findById("wnd[1]/tbar[0]/btn[0]").press
+    session.findById("wnd[1]/tbar[0]/btn[0]").press
+    
+    ActiveWorkbook.Sheets("List1").Range("A1:AM" & Cells(Rows.Count, 1).End(xlUp).Offset(1, 0).Row).Copy ThisWorkbook.Worksheets("DispoReport_SAP").Range("A1")
+    
+    session.findById("wnd[1]/tbar[0]/btn[0]").press
+    Connection.CloseSession ("ses[0]")
+    
+    With shtDispoReport
+        .Select
+        
+        If .AutoFilterMode = True Then
+            .AutoFilterMode = False
+        End If
+        
+        lstrow = Cells(Rows.Count, 1).End(xlUp).Row
+        .Range("$A$1:$AM$" & lstrow).AutoFilter field:=19, Criteria1:="<>*1*"
+        
+        lstrow = Cells(Rows.Count, 1).End(xlUp).Row
+        
+        If lstrow > 1 Then
+            .Range("A2:AM" & lstrow).SpecialCells(xlCellTypeVisible).Select
+            Selection.EntireRow.Delete
+            .AutoFilterMode = False
+        Else
+            .AutoFilterMode = False
+        End If
+        
+    End With
+        
+
+End Sub
+
+Sub ZEDMT_Query_SAP()
+
+    Dim SAP
+    
+    Sheets("ZEDMT_SAP").Select
+    Sheets("ZEDMT_SAP").Cells.Clear
+    
+    Sheets("Nastavení").Select
+    
+    This_wbk = ThisWorkbook.Name
+    
+    If Dir("C:\Program Files\SAP\FrontEnd\SAPGUI\saplogon.exe") = "" Then
+        Call Shell("C:\Program Files (x86)\SAP\FrontEnd\SAPgui\saplogon.exe", vbNormalFocus)
+    Else: Call Shell("C:\Program Files\SAP\FrontEnd\SAPGUI\saplogon.exe", vbNormalFocus)
+    End If
+    
+    Application.Wait Now + TimeValue("00:00:07")
+    
+    Set sgui = GetObject("SAPGUI")
+    If Err <> 0 Then
+      MsgBox "Je tøeba spustit SAP logon.", vbInformation
+      'End
+    End If
+    
+    Set sapp = sgui.GetScriptingEngine
+    p40 = -1
+    'Call spath
+    For cykl = 0 To sapp.Connections.Count - 1
+      Set Connection = sapp.Children(CInt(cykl))
+      Set session = Connection.Children(0)
+      'LES
+      If session.info.systemname = "P40" Then
+        p40 = cykl
+      End If
+    Next cykl
+    
+    If p40 = -1 Then
+        Set Connection = sapp.openconnection("CZ LES P40 Productionsystem", True)
+        Set session = Connection.Children(0)
+    Else
+      Set Connection = sapp.Children(CInt(p40))
+      Set session = Connection.Children(0)
+    End If
+    
+    session.findById("wnd[0]").maximize
+    session.findById("wnd[0]/tbar[0]/okcd").text = "/nsq01"
+    session.findById("wnd[0]").sendVKey 0
+    session.findById("wnd[0]/tbar[1]/btn[19]").press
+    session.findById("wnd[1]/usr/cntlGRID1/shellcont/shell").currentCellRow = -1
+    session.findById("wnd[1]/usr/cntlGRID1/shellcont/shell").selectColumn "DBGBNUM"
+    session.findById("wnd[1]/tbar[0]/btn[29]").press
+    session.findById("wnd[2]/usr/ssub%_SUBSCREEN_FREESEL:SAPLSSEL:1105/ctxt%%DYN001-LOW").text = "DISPO"
+    session.findById("wnd[2]/usr/ssub%_SUBSCREEN_FREESEL:SAPLSSEL:1105/ctxt%%DYN001-LOW").caretPosition = 5
+    session.findById("wnd[2]/tbar[0]/btn[0]").press
+    session.findById("wnd[1]/usr/cntlGRID1/shellcont/shell").currentCellColumn = "DBBGTEXT"
+    session.findById("wnd[1]/usr/cntlGRID1/shellcont/shell").selectedRows = "0"
+    session.findById("wnd[1]/tbar[0]/btn[0]").press
+    session.findById("wnd[0]/usr/cntlGRID_CONT0050/shellcont/shell").currentCellRow = -1
+    session.findById("wnd[0]/usr/cntlGRID_CONT0050/shellcont/shell").selectColumn "QNUM"
+    session.findById("wnd[0]/usr/cntlGRID_CONT0050/shellcont/shell").pressToolbarButton "&MB_FILTER"
+    
+    'spusteni query ZLV_ZEDMT a vyplneni varianty
+    session.findById("wnd[1]/usr/ssub%_SUBSCREEN_FREESEL:SAPLSSEL:1105/ctxt%%DYN001-LOW").text = "ZLV_ZEDMT"
+    session.findById("wnd[1]/usr/ssub%_SUBSCREEN_FREESEL:SAPLSSEL:1105/ctxt%%DYN001-LOW").caretPosition = 9
+    session.findById("wnd[1]/tbar[0]/btn[0]").press
+    session.findById("wnd[0]/usr/cntlGRID_CONT0050/shellcont/shell").currentCellColumn = "TITLE"
+    session.findById("wnd[0]/usr/cntlGRID_CONT0050/shellcont/shell").selectedRows = "0"
+    session.findById("wnd[0]/tbar[1]/btn[8]").press
+    
+    session.findById("wnd[0]/usr/btn%_SP$00009_%_APP_%-VALU_PUSH").press
+    session.findById("wnd[1]/tbar[0]/btn[16]").press
+    session.findById("wnd[1]/tbar[0]/btn[8]").press
+    
+    session.findById("wnd[0]/usr/txtP%Z_0012").text = [RLZ] '"1"
+    session.findById("wnd[0]/usr/ctxtSP$00002-LOW").text = [dc] '"9200"
+    session.findById("wnd[0]/usr/ctxtSP$00004-LOW").text = [sklad] '"C21"
+    session.findById("wnd[0]/usr/ctxtSP$00004-LOW").SetFocus
+    session.findById("wnd[0]/usr/ctxtSP$00004-LOW").caretPosition = 3
+    
+    'vyloucit typy skladu
+    session.findById("wnd[0]/usr/btn%_SP$00001_%_APP_%-VALU_PUSH").press
+    session.findById("wnd[1]/tbar[0]/btn[16]").press
+    session.findById("wnd[1]/usr/tabsTAB_STRIP/tabpNOSV").Select
+    If Range("C3") <> "" Then
+        Range(Range("C2"), Range("C2").End(xlDown)).Copy
+    Else
+        Range("C2").Copy
+    End If
+    session.findById("wnd[1]/tbar[0]/btn[24]").press
+    session.findById("wnd[1]/tbar[0]/btn[8]").press
+    
+    'vlozit artikly
+    session.findById("wnd[0]/usr/btn%_SP$00003_%_APP_%-VALU_PUSH").press
+    session.findById("wnd[1]/tbar[0]/btn[16]").press
+        If Range("F3") <> "" Then
+        Range(Range("F2"), Range("F2").End(xlDown)).Copy
+    Else
+        Range("F2").Copy
+    End If
+    session.findById("wnd[1]/tbar[0]/btn[24]").press
+    session.findById("wnd[1]/tbar[0]/btn[8]").press
+    
+    'vlozit WG
+    session.findById("wnd[0]/usr/btn%_SP$00005_%_APP_%-VALU_PUSH").press
+    session.findById("wnd[1]/tbar[0]/btn[16]").press
+    If Range("D3") <> "" Then
+        Range(Range("D2"), Range("D2").End(xlDown)).Copy
+    Else
+        Range("D2").Copy
+    End If
+    session.findById("wnd[1]/tbar[0]/btn[24]").press
+    session.findById("wnd[1]/usr/tabsTAB_STRIP/tabpNOSV").Select
+    If Range("E3") <> "" Then
+        Range(Range("E2"), Range("E2").End(xlDown)).Copy
+    Else
+        Range("E2").Copy
+    End If
+    session.findById("wnd[1]/tbar[0]/btn[24]").press
+    session.findById("wnd[1]/tbar[0]/btn[8]").press
+    session.findById("wnd[0]/usr/ctxtSP$00008-LOW").SetFocus
+    session.findById("wnd[0]/usr/ctxtSP$00008-LOW").caretPosition = 0
+    session.findById("wnd[0]").sendVKey 2
+    session.findById("wnd[1]/usr/cntlOPTION_CONTAINER/shellcont/shell").setCurrentCell 5, "TEXT"
+    session.findById("wnd[1]/usr/cntlOPTION_CONTAINER/shellcont/shell").selectedRows = "5"
+    session.findById("wnd[1]/usr/cntlOPTION_CONTAINER/shellcont/shell").doubleClickCurrentCell
+    session.findById("wnd[0]/usr/txtSP$00006-LOW").text = "X"
+    session.findById("wnd[0]/usr/txtSP$00006-LOW").SetFocus
+    session.findById("wnd[0]/usr/txtSP$00006-LOW").caretPosition = 1
+    session.findById("wnd[0]/tbar[1]/btn[8]").press
+    session.findById("wnd[0]/usr/cntlCONTAINER/shellcont/shell").pressToolbarContextButton "&MB_EXPORT"
+    session.findById("wnd[0]/usr/cntlCONTAINER/shellcont/shell").selectContextMenuItem "&XXL"
+    session.findById("wnd[1]/usr/cmbG_LISTBOX").SetFocus
+    session.findById("wnd[1]/usr/cmbG_LISTBOX").Key = "33"
+    session.findById("wnd[1]/tbar[0]/btn[0]").press
+    session.findById("wnd[1]/tbar[0]/btn[0]").press
+    session.findById("wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[0,0]").Select
+    session.findById("wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[0,0]").SetFocus
+    session.findById("wnd[1]/tbar[0]/btn[0]").press
+    session.findById("wnd[1]/tbar[0]/btn[0]").press
+    
+    SAP_wbk = Workbooks(Workbooks.Count).Name
+    Windows(SAP_wbk).Activate
+
+    Cells.Select
+    Selection.Copy
+    Windows(This_wbk).Activate
+    Sheets("ZEDMT_SAP").Activate
+    Range("A1").Select
+    ActiveSheet.Paste
+    
+    session.findById("wnd[1]/tbar[0]/btn[0]").press
+    
+''    If p40 = -1 Then Connection.CloseSession ("ses[0]")
+    Connection.CloseSession ("ses[0]")
+''    session.findById("wnd[0]/tbar[0]/okcd").text = "/nex"
+''    session.findById("wnd[0]").sendVKey 0
+    
+End Sub
+
+Sub ExportFilialeDispo()
+
+    Application.DisplayAlerts = False
+    Application.ScreenUpdating = False
+    
+    shtProchazejiciRLZ.Visible = True
+    
+    cesta = [cesta]
+    dc = [dc]
+    sklad = [sklad]
+    
+    With shtExportFilialeDispo
+        .Select
+        .Cells.Clear
+        .Cells(1, 1).Value = "Záv."
+        .Cells(1, 2).Value = "Materiál"
+        .Cells(1, 3).Value = "Krát.text materiálu"
+        .Cells(1, 4).Value = "Množství k pøerozdìlení"
+        .Cells(1, 5).Value = "VMJ"
+        .Cells(1, 6).Value = "DMT"
+        .Cells(1, 7).Value = "Kreis"
+        .Cells(1, 8).Value = "Poèet ks ve VMJ"
+
+        shtFinalData.Select
+        lstrow = shtFinalData.Cells(Rows.Count, 1).End(xlUp).Row
+        shtFinalData.Range("C2:D" & lstrow).Select
+        Selection.Copy
+        
+        .Select
+        .Range("B2").PasteSpecial xlPasteValues
+        
+        lstcol = shtProchazejiciRLZ.Cells(1, Columns.Count).End(xlToLeft).Column
+    
+        Row = 2
+        col = 2
+        
+        For Row = 2 To lstrow
+            .Cells(Row, 1) = [dc]
+            .Cells(Row, 4) = shtFinalData.Cells(Row, 13)
+            .Cells(Row, 5) = shtFinalData.Cells(Row, 33)
+            .Cells(Row, 7) = shtFinalData.Cells(Row, 30)
+            .Cells(Row, 8) = shtFinalData.Cells(Row, 26)
+            
+            ProchZasoba = shtFinalData.Cells(Row, 13)
+            ZasobaArtiklRLZ = 0
+                 
+            For col = 2 To lstcol - 1
+            
+                Set findArticle = shtProchazejiciRLZ.Range("A:A").Find(What:=.Range("B" & Row).Value, LookAt:=xlWhole)
+                
+                If findArticle Is Nothing Then
+                    
+                Else
+                    findArticleRow = findArticle.Row
+                    
+                    If shtProchazejiciRLZ.Cells(findArticleRow, col) <> "" Then
+                        If .Cells(Row, 6) = "" Then
+                            .Cells(Row, 6) = Format(shtProchazejiciRLZ.Cells(1, col), "dd.mm.yyyy")
+                            ZasobaArtiklRLZ = ZasobaArtiklRLZ + shtProchazejiciRLZ.Cells(findArticleRow, col)
+                        Else
+                            If ZasobaArtiklRLZ < ProchZasoba Then
+                                .Cells(Row, 6) = .Cells(Row, 6) & "; " & Format(shtProchazejiciRLZ.Cells(1, col), "dd.mm.yyyy")
+                                ZasobaArtiklRLZ = ZasobaArtiklRLZ + shtProchazejiciRLZ.Cells(findArticleRow, col)
+                            Else
+                                GoTo DalsiArtikl
+                            End If
+                        End If
+                    End If
+                End If
+                
+            Next col
+DalsiArtikl:
+        Next Row
+        
+        .Columns("F").NumberFormat = "m/d/yyyy"
+        .Columns("A:H").AutoFit
+        .Range("A1").Select
+    
+    End With
+    
+    shtProchazejiciRLZ.Visible = 0
+    
+    myFileName = "Export_pro_Filiale_Dispo_" & Format(Date, "yyyymmdd") & "_" & dc & "_" & sklad & ".xlsx"
+
+    shtExportFilialeDispo.Copy
+
+    With ActiveWorkbook
+         .SaveAs Filename:=cesta & myFileName ', FileFormat:=xlWorkbookNormal
+         .Close SaveChanges:=False
+    End With
+    
+    Application.DisplayAlerts = True
+    Application.ScreenUpdating = True
+    Application.CutCopyMode = False
+    
+    MsgBox "Export pro Filiale Dispo je pøipraven. Soubor je uložen na " & cesta, vbInformation
+End Sub
+
+Sub ZEDMT_zpracovani()
+
+    Dim dc As String
+    Dim i As Integer
+    Dim a As String
+    Dim pt As PivotTable
+    Dim pc As PivotCache
+    Dim pf As PivotField
+''    Dim filters As Variant
+    Dim source_data As Range
+
+    With shtProchazejiciRLZ
+        .Select
+        .Cells.Clear
+    End With
+            
+    With shtZEDMT
+        .Select
+        lstrow = .Cells(Rows.Count, 1).End(xlUp).Row
+        lstcol = .Cells(1, Columns.Count).End(xlToLeft).Column
+        
+        If lstrow = 1 Then
+            MsgBox "Žádný artikl nevyhodnocen, makro bude ukonèeno!", vbInformation
+            End
+        End If
+        
+        Set source_data = .Range(Cells(1, 1), Cells(lstrow, lstcol))
+                
+''        'KT a výstupní data
+''        Range("A2:T2").Select
+''        If Range("A3").Value <> "" Then Range(Selection, Selection.End(xlDown)).Select
+    
+        shtPivotZEDMT.Visible = True
+        shtPivotZEDMT.Select
+        Range("A3").Select
+    ''    ActiveSheet.PivotTables("Kontingenèní tabulka1").PivotCache.Refresh
+        
+        Set pc = ThisWorkbook.PivotCaches.Create(xlDatabase, SourceData:=source_data)
+        Set pt = shtPivotZEDMT.PivotTables("Kontingenèní tabulka1")
+        pt.ChangePivotCache pc
+        
+        Set pf = shtPivotZEDMT.PivotTables("Kontingenèní tabulka1").PivotFields("Rozhodnutí")
+''        filters = shtSettings.Range("P2:P3")
+        pf.ClearAllFilters
+        pf.EnableMultiplePageItems = True
+        pf.PivotItems("Nepøerozdìlovat").Visible = False
+        
+''        With pf
+''            For i = 1 To pf.PivotItems.Count
+''                j = 1
+''                Do While j <= UBound(filters, 1) - LBound(filters, 1) + 1
+''                    If pf.PivotItems(i).Name = filters(j, 1) Then
+''                        pf.PivotItems(pf.PivotItems(i).Name).Visible = True
+''                    Exit Do
+''                    Else
+''                        pf.PivotItems(pf.PivotItems(i).Name).Visible = False
+''                    End If
+''                    j = j + 1
+''                Loop
+''            Next i
+''        End With
+    
+    End With
+    
+    With shtPivotZEDMT
+        .Select
+    
+        lstrow = .Cells(Rows.Count, 1).End(xlUp).Row
+        lstcol = .Cells(4, Columns.Count).End(xlToLeft).Column
+        
+        .Range(Cells(1, 1), Cells(lstrow, lstcol)).Copy
+    End With
+
+    With shtProchazejiciRLZ
+        .Select
+        
+        .Range("A1").PasteSpecial Paste:=xlPasteValues, Operation:=xlNone, SkipBlanks:=False, Transpose:=False
+        .Rows("1:3").Delete Shift:=xlUp
+        .Columns("A:XFD").EntireColumn.AutoFit
+        .Range("A1").Select
+    End With
+    
+    Application.DisplayAlerts = True
+    Application.ScreenUpdating = True
+
+End Sub
+
+Sub DohledaniAkce()
+    With shtPromotion
+        .Select
+        .Range("AA1") = "Aktuální akce"
+        .Range("AB1") = "Budoucí akce"
+        
+        lstrow = .Cells(Rows.Count, 1).End(xlUp).Row
+        lstcol = .Cells(4, Columns.Count).End(xlToLeft).Column
+        
+        With shtPromotion.Sort
+            With .SortFields
+                .Clear
+                .Add Key:=Range("D1:D" & lstrow), SortOn:=xlSortOnValues, Order:=xlAscending, DataOption:=xlSortTextAsNumbers
+                .Add Key:=Range("Y1:Y" & lstrow), SortOn:=xlSortOnValues, Order:=xlAscending, DataOption:=xlSortNormal
+            End With
+            .SetRange Range("A2:Z" & lstrow)
+            .Apply
+        End With
+        
+        Row = 2
+        
+        Do
+            If .Range("Y" & Row) <= Date Then
+                .Range("AA" & Row) = .Range("A" & Row) & " | " & Format(.Range("Y" & Row), "dd.mm.yyyy")
+                
+                If .Range("D" & Row) = .Range("D" & Row + 1) Then
+                    .Range("AB" & Row) = .Range("A" & Row + 1) & " | " & Format(.Range("Y" & Row + 1), "dd.mm.yyyy")
+                End If
+            Else
+                .Range("AB" & Row) = .Range("A" & Row) & " | " & Format(.Range("Y" & Row), "dd.mm.yyyy")
+                
+                If .Range("D" & Row) = .Range("D" & Row + 1) Then
+                    .Range("AB" & Row + 1) = .Range("A" & Row) & " | " & Format(.Range("Y" & Row), "dd.mm.yyyy")
+                End If
+            End If
+                
+            If .Range("D" & Row) = .Range("D" & Row - 1) Then
+                .Range("AA" & Row) = .Range("AA" & Row - 1)
+                .Range("AB" & Row) = .Range("AB" & Row - 1)
+            End If
+            
+            Row = Row + 1
+        Loop Until Row > lstrow
+        
+        .Columns("A:AB").AutoFit
+        
+    End With
+End Sub
+
+Sub Akce_Query_SAP()
+    Dim SAP
+    
+    This_wbk = ThisWorkbook.Name
+    
+    Sheets("akce_SAP").Select
+    Sheets("akce_SAP").Cells.Clear
+
+    With shtFinalData
+        .Select
+        
+        lstrow = Cells(Rows.Count, 3).End(xlUp).Row
+        
+        .Range("C2:C" & lstrow).Select
+        Selection.Copy
+    End With
+    
+    If Dir("C:\Program Files\SAP\FrontEnd\SAPGUI\saplogon.exe") = "" Then
+        Call Shell("C:\Program Files (x86)\SAP\FrontEnd\SAPgui\saplogon.exe", vbNormalFocus)
+    Else: Call Shell("C:\Program Files\SAP\FrontEnd\SAPGUI\saplogon.exe", vbNormalFocus)
+    End If
+    
+    Application.Wait Now + TimeValue("00:00:07")
+    
+    Set sgui = GetObject("SAPGUI")
+    If Err <> 0 Then
+        MsgBox "Je tøeba spustit SAP logon.", vbInformation
+        'End
+    End If
+    
+    Set sapp = sgui.GetScriptingEngine
+    tp1 = -1
+    'Call spath
+    For cykl = 0 To sapp.Connections.Count - 1
+        Set Connection = sapp.Children(CInt(cykl))
+        Set session = Connection.Children(0)
+        'LES
+        If session.info.systemname = "TP1" Then
+''        If session.info.systemname = "A00" Then
+            tp1 = cykl
+        End If
+    Next cykl
+    
+    If tp1 = -1 Then
+        Set Connection = sapp.openconnection("CZ RET TP1 Productionsystem", True)
+''        Set Connection = sapp.openconnection("CZ RET A00 Testsystem", True)
+        Set session = Connection.Children(0)
+    Else
+        Set Connection = sapp.Children(CInt(tp1))
+        Set session = Connection.Children(0)
+    End If
+    
+    session.findById("wnd[0]").maximize
+    session.findById("wnd[0]/tbar[0]/okcd").text = "/nSQ01"
+    session.findById("wnd[0]").sendVKey 0
+''    session.findById("wnd[0]/usr/cntlGRID_CONT0050/shellcont/shell").currentCellRow = -1
+    session.findById("wnd[0]/usr/cntlGRID_CONT0050/shellcont/shell").selectColumn "QNUM"
+    session.findById("wnd[0]/usr/cntlGRID_CONT0050/shellcont/shell").selectedRows = ""
+    session.findById("wnd[0]/tbar[1]/btn[19]").press
+''    session.findById("wnd[1]/usr/cntlGRID1/shellcont/shell").currentCellRow = -1
+    
+''    session.findById("wnd[1]/usr/cntlGRID1/shellcont/shell").selectColumn "DBGBNUM"
+    session.findById("wnd[1]/usr/cntlGRID1/shellcont/shell/shellcont[1]/shell").selectColumn "DBGBNUM"
+    
+    session.findById("wnd[1]/tbar[0]/btn[29]").press
+    session.findById("wnd[2]/usr/ssub%_SUBSCREEN_FREESEL:SAPLSSEL:1105/ctxt%%DYN001-LOW").text = "ZSCM_CENTRAL"
+    session.findById("wnd[2]/usr/ssub%_SUBSCREEN_FREESEL:SAPLSSEL:1105/ctxt%%DYN001-LOW").caretPosition = 12
+    session.findById("wnd[2]").sendVKey 0
+    session.findById("wnd[1]/usr/cntlGRID1/shellcont/shell/shellcont[1]/shell").selectedRows = "0"
+    session.findById("wnd[1]/tbar[0]/btn[0]").press
+''    session.findById("wnd[0]/usr/cntlGRID_CONT0050/shellcont/shell").currentCellRow = -1
+    session.findById("wnd[0]/usr/cntlGRID_CONT0050/shellcont/shell").selectColumn "QNUM"
+    session.findById("wnd[0]/usr/cntlGRID_CONT0050/shellcont/shell").selectedRows = ""
+    session.findById("wnd[0]/usr/cntlGRID_CONT0050/shellcont/shell").pressToolbarButton "&MB_FILTER"
+    session.findById("wnd[1]/usr/ssub%_SUBSCREEN_FREESEL:SAPLSSEL:1105/ctxt%%DYN001-LOW").text = "ZEK0078"
+    session.findById("wnd[1]/usr/ssub%_SUBSCREEN_FREESEL:SAPLSSEL:1105/ctxt%%DYN001-LOW").caretPosition = 7
+    session.findById("wnd[1]").sendVKey 0
+    session.findById("wnd[0]/usr/cntlGRID_CONT0050/shellcont/shell").selectedRows = "0"
+    session.findById("wnd[0]/tbar[1]/btn[17]").press
+    session.findById("wnd[1]").sendVKey 4
+''    session.findById("wnd[2]/usr/cntlALV_CONTAINER_1/shellcont/shell").currentCellRow = -1
+    session.findById("wnd[2]/usr/cntlALV_CONTAINER_1/shellcont/shell").selectColumn "VARIANT"
+    session.findById("wnd[2]/usr/cntlALV_CONTAINER_1/shellcont/shell").pressToolbarButton "&MB_FILTER"
+    session.findById("wnd[3]/usr/ssub%_SUBSCREEN_FREESEL:SAPLSSEL:1105/ctxt%%DYN001-LOW").text = "KRITICKE_DMT"
+    session.findById("wnd[3]/usr/ssub%_SUBSCREEN_FREESEL:SAPLSSEL:1105/ctxt%%DYN001-LOW").caretPosition = 12
+    session.findById("wnd[3]").sendVKey 0
+    session.findById("wnd[2]/usr/cntlALV_CONTAINER_1/shellcont/shell").selectedRows = "0"
+    session.findById("wnd[2]/tbar[0]/btn[2]").press
+    session.findById("wnd[1]/tbar[0]/btn[0]").press
+    session.findById("wnd[0]/usr/btn%_SP$00016_%_APP_%-VALU_PUSH").press
+    session.findById("wnd[1]/tbar[0]/btn[16]").press
+    session.findById("wnd[1]/tbar[0]/btn[24]").press
+    session.findById("wnd[1]/tbar[0]/btn[8]").press
+    session.findById("wnd[0]/tbar[1]/btn[8]").press
+''    session.findById("wnd[0]/tbar[0]/btn[3]").press
+''    session.findById("wnd[0]/usr/rad%ALV").SetFocus
+''    session.findById("wnd[0]/usr/rad%ALV").Select
+''    session.findById("wnd[0]/tbar[1]/btn[8]").press
+''    session.findById("wnd[0]/usr/cntlGRID1/shellcont/shell").currentCellColumn = "WAKH-VKDBI"
+    session.findById("wnd[0]/usr/cntlGRID1/shellcont/shell/shellcont[1]/shell").selectedRows = "0"
+    session.findById("wnd[0]/usr/cntlGRID1/shellcont/shell/shellcont[1]/shell").contextMenu
+    session.findById("wnd[0]/usr/cntlGRID1/shellcont/shell/shellcont[1]/shell").selectContextMenuItem "&XXL"
+    
+''    session.findById("wnd[1]/usr/cmbG_LISTBOX").SetFocus
+''    session.findById("wnd[1]/usr/cmbG_LISTBOX").Key = "33"
+''    session.findById("wnd[1]/tbar[0]/btn[0]").press
+
+    session.findById("wnd[1]/usr/ssubSUB_CONFIGURATION:SAPLSALV_GUI_CUL_EXPORT_AS:0512/cmbGS_EXPORT-FORMAT").Key = "   8-TT-STANDARD"
+    session.findById("wnd[1]/tbar[0]/btn[20]").press
+    
+    session.findById("wnd[1]/tbar[0]/btn[0]").press
+    session.findById("wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[0,0]").Select
+    session.findById("wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[0,0]").SetFocus
+    session.findById("wnd[1]/tbar[0]/btn[0]").press
+    session.findById("wnd[1]/tbar[0]/btn[0]").press
+    
+    SAP_wbk = Workbooks(Workbooks.Count).Name
+    Windows(SAP_wbk).Activate
+
+    Cells.Select
+    Selection.Copy
+    Windows(This_wbk).Activate
+    Sheets("akce_SAP").Activate
+    Range("A1").Select
+    ActiveSheet.Paste
+    
+    session.findById("wnd[1]/tbar[0]/btn[0]").press
+End Sub
